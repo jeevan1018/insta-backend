@@ -1,19 +1,28 @@
 import express from "express";
-import dotenv from "dotenv";
+import  "dotenv/config" ;
+import { connectMongoDB } from "./connection.js";
+import userRouter from "./router/user.routes.js";
+import { authMiddleware } from "./middleware/auth.middleware.js";
+
+const app = express();  
+
+const PORT = process.env.PORT || 3000;
 
 
 
-dotenv.config();
-
-const app = express();
-const PORT = process.env.PORT || 5000;
-
-
-app.get("/",(req,res)=>{
-    console.log("Hello world");
-    res.send("Hello world");
+connectMongoDB(process.env.MONGODB_URL).then(()=>{
+  console.log("Connected to MongoDB");
+}).catch((error)=>{
+  console.error("Error connecting to MongoDB:", error);
 })
 
-app.listen(PORT,()=>{
-    console.log("Server is running on port 5000");
+app.use(express.json())
+app.use(authMiddleware)
+
+app.use("/user", userRouter)
+
+
+app.listen(PORT, async ()=>{
+  console.log(`Server is running on port ${PORT}`);
+
 })
