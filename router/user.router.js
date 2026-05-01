@@ -1,94 +1,196 @@
 import express from "express";
-import { User } from "../model/user.model.js";
+import { User } from "../schema/user.schema.js";
 import { randomBytes, createHmac } from "node:crypto";
 import jwt from "jsonwebtoken";
 import { ensureAuthenticated } from "../middleware/auth.middleware.js";
+import {
+  validateRegisterRequest,
+  validateLoginRequest,
+} from "../utils/validation.js";
+import { sendSuccess, sendError, sendValidationError } from "../utils/responses.js";
+
 const router = express.Router();
 
-router.patch("/profile",ensureAuthenticated, async (req, res) => {
+/**
+ * PATCH /user/profile
+ * Update user profile (requires authentication)
+ */
+router.patch("/profile", ensureAuthenticated, async (req, res) => {
   try {
     const { name } = req.body;
     console.log("User ID from token:", req.user);
-   await User.findByIdAndUpdate(req.user.id, { name });
+    await User.findByIdAndUpdate(req.user.id, { name });
 
-    res.status(200).json({ message: "Profile updated successfully" });
-  }catch (error) {
+    return sendSuccess(res, { message: "Profile updated successfully" }, 200);
+  } catch (error) {
     console.error("Error updating profile:", error);
-    res.status(500).json({ message: "Internal server error" });
+    return sendError(res, "Internal server error", 500);
   }
 });
 
+/**
+ * POST /user/register
+ * Register a new user
+ * 
+ * Request Body:
+ * {
+ *   "name": "John Doe",
+ *   "email": "john@example.com",
+ *   "password": "Password@123",
+ *   "confirmPassword": "Password@123"
+ * }
+ * 
+ * Response (201 Created):
+ * {
+ *   "success": true,
+ *   "message": "User registered successfully",
+ *   "data": {
+ *     "id": "user_id",
+ *     "name": "John Doe",
+ *     "email": "john@example.com"
+ *   },
+ *   "timestamp": "2024-01-01T12:00:00.000Z"
+ * }
+ */
 router.post("/register", async (req, res) => {
   try {
-    const { name, email, password } = req.body;
+    const { name, email, password, confirmPassword } = req.body;
 
-    const existingUser = await User.findOne({ email });
+    // Validate request payload
+    const validation = validateRegisterRequest(
+      name,
+      email,
+      password,
+      confirmPassword
+    );
 
-    if (existingUser) {
-      return res.status(400).json({ message: "User already exists" });
+    if (!validation.isValid) {
+      return sendValidationError(res, validation.errors);
     }
 
-    const salt = randomBytes(256).toString("hex");
+    // Check if user already exists
+    const existingUser = await User.findOne({ email: email.toLowerCase() });
+
+    if (existingUser) {
+      return sendError(
+        res,
+        "Email already registered",
+        409,
+        { email: "This email is already in use" }
+      );
+    }
+
+    // Hash password with salt
+    const salt = randomBytes(32).toString("hex");
     const hashedPassword = createHmac("sha256", salt)
       .update(password)
       .digest("hex");
 
+    // Create user
     const user = await User.create({
-      name,
-      email,
+      name: name.trim(),
+      email: email.toLowerCase(),
       password: hashedPassword,
       salt,
     });
 
-    return res.status(201).json({
-      message: "User registered successfully",
-      user: {
+    return sendSuccess(
+      res,
+      {
         id: user._id,
         name: user.name,
         email: user.email,
       },
-    });
-
+      201,
+      "User registered successfully"
+    );
   } catch (error) {
     console.error("Error registering user:", error);
-    res.status(500).json({ message: "Internal server error" });
+    return sendError(res, "Internal server error", 500);
   }
 });
 
+/**
+ * POST /user/login
+ * Authenticate user and return JWT token
+ * 
+ * Request Body:
+ * {
+ *   "email": "john@example.com",
+ *   "password": "Password@123"
+ * }
+ * 
+ * Response (200 OK):
+ * {
+ *   "success": true,
+ *   "message": "User logged in successfully",
+ *   "data": {
+ *     "token": "eyJhbGc...",
+ *     "user": {
+ *       "id": "user_id",
+ *       "name": "John Doe",
+ *       "email": "john@example.com"
+ *     },
+ *     "expiresIn": "24h"
+ *   },
+ *   "timestamp": "2024-01-01T12:00:00.000Z"
+ * }
+ */
 router.post("/login", async (req, res) => {
   try {
-    const { email, password } = req.body;   
-    const exsistingUser = await User.findOne({ email });
+    const { email, password } = req.body;
 
-    if (!exsistingUser) {
-      return res.status(404).json({ message: "User not found" });
+    // Validate request payload
+    const validation = validateLoginRequest(email, password);
+
+    if (!validation.isValid) {
+      return sendValidationError(res, validation.errors);
     }
 
-    const salt = exsistingUser.salt;
-    const hashedPassword = exsistingUser.password;
+    // Find user by email
+    const user = await User.findOne({ email: email.toLowerCase() });
 
-    const newHash = createHmac("sha256", salt).update(password).digest("hex");
-
-    if (newHash !== hashedPassword) {
-      return res.status(400).json({ message: "Invalid credentials" });
+    if (!user) {
+      return sendError(res, "Invalid email or password", 401);
     }
 
-    const payload = {
-      id: exsistingUser._id,
-      name: exsistingUser.name,
-      email: exsistingUser.email,
+    // Verify password
+    const hashedPassword = createHmac("sha256", user.salt)
+      .update(password)
+      .digest("hex");
+
+    if (hashedPassword !== user.password) {
+      return sendError(res, "Invalid email or password", 401);
+    }
+
+    // Generate JWT token
+    const tokenPayload = {
+      id: user._id,
+      name: user.name,
+      email: user.email,
     };
 
-    const token = jwt.sign(payload, process.env.JWT_SECRET_KEY, { expiresIn: "1h" });
-
-    return res.status(200).json({
-      message: "User logged in successfully",
-      token,
+    const token = jwt.sign(tokenPayload, process.env.JWT_SECRET_KEY, {
+      expiresIn: "24h",
     });
 
+    return sendSuccess(
+      res,
+      {
+        token,
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+        },
+        expiresIn: "24h",
+      },
+      200,
+      "User logged in successfully"
+    );
   } catch (error) {
     console.error("Error logging in user:", error);
-    res.status(500).json({ message: "Internal server error" });
+    return sendError(res, "Internal server error", 500);
   }
 });
 
